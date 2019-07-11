@@ -5,7 +5,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import copy
 import re
-
+import time
+import random
 '''
 the sql tables are Markets, Contracts, Prices, Volumes
 markets: market_id, market_name, market_url, market_status, market_predictit_id
@@ -19,9 +20,11 @@ markets[]  (accounts in order are rdt, wh, vp, potus)
             contractList{}: indexed by contractid
                 contractPair: name + pricelist
                     priceList{}: indexed by timestamp (yymmddhhmm)
+                        [avg of buy and sell costs, buy, sell]
 '''
 
 def getRawMarkets(): #populates rawMarkets with my formatting... #run to load data into data.txt from data folder
+    startTime = time.time()
     rawMarkets = [[], [], [], [], []]
     for filename in os.listdir('data'):
         db = sql.connect('data/' + filename)
@@ -29,12 +32,11 @@ def getRawMarkets(): #populates rawMarkets with my formatting... #run to load da
         for market in marketsSQL:
             contracts = [contract for contract in db.execute('select * from contracts where market_id = ' + str(market[0]) )]
             contractLabels = str(tuple([contract[0] for contract in contracts]))
-            prices = [price for price in db.execute('select * from prices where contract_id in ' + contractLabels + ' and time_stamp like ' + '"% __:00:%"')]
             newContracts = []
             for contract in contracts:
-                newPrices = [price for price in prices if price[1] == contract[0]]
-                newContracts.append((contract, newPrices))
-            marketPair = (market, newContracts) #wait this whole shit is fucked up....
+                prices = [price for price in db.execute('select * from prices where contract_id = ' + str(contract[0]) + ' and time_stamp like ' + '"% __:__:%"')]
+                newContracts.append((contract, prices))
+            marketPair = (market, newContracts)
             if 'realDonald' in str(market[1]):
                 (rawMarkets[0]).append(marketPair)
             elif 'whitehouse' in str(market[1]):
@@ -46,7 +48,10 @@ def getRawMarkets(): #populates rawMarkets with my formatting... #run to load da
             else:
                 (rawMarkets[4]).append(marketPair) #shouldnt happen
         print('file ' + filename + ' done')
-    return rawMarkets
+    with open('rawData.txt', 'wb') as saveFile:
+        pickle.dump(rawMarkets, saveFile)
+    print('getting markets took ' + str(time.time() - startTime))
+
 def joinMarkets(rawMarkets):
     markets = [{}, {}, {}, {}, {}]
     for i in range(len(rawMarkets)): #loop through the 4 twitter accounts
@@ -102,22 +107,31 @@ def cleanPrices(markets):
                         buyYes = 0
                     if sellYes == None:
                         sellYes = 0
-                    newPriceList[condensedTimeStamp] = ((buyYes+sellYes) / 2.0)
-                        #this makes the pricelist indexed by timestamp (up to the minute character), and reduces price to an average
+                    if (abs(buyYes-sellYes)>.9):
+                        sellYes = 1
+                        buyYes = 1
+                    newPriceList[condensedTimeStamp] = [((buyYes+sellYes) / 2.0), buyYes, sellYes]
+                        #this makes the pricelist indexed by timestamp (up to the minute character), and reduces price to list containing [avg, buy, sell]
                 account[marketid][1][contractid][1] = newPriceList
     return markets
 def cleanData():
-    out = cleanPrices(cleanContracts(joinMarkets(getRawMarkets())))
+    startTime = time.time()
+    with open('rawData.txt', 'rb') as saveFile:
+        rawMarkets = pickle.load(saveFile)
+    markets = cleanPrices(cleanContracts(joinMarkets(rawMarkets)))
     with open('data.txt', 'wb') as saveFile:
-        pickle.dump(out, saveFile)
-
+        pickle.dump(markets, saveFile)
+    print('cleaning data took ' + str(time.time() - startTime))
 
 #run this to load data from the sql files into data.txt
-#cleanData takes a longass time
+#getting raw markets takes a longass time
+#getRawMarkets()
 #cleanData()
+
+startTime = time.time()
 with open('data.txt', 'rb') as saveFile:
     markets = pickle.load(saveFile)
-#example get: from the 0th account, the 5372th market, the contractList, the 14809th contract, the pricelist, the 0th price
+print('loaded data in ' + str(time.time()-startTime))
 
 def getMarket(marketid, markets = markets):
     for account in markets:
@@ -127,35 +141,41 @@ def plotMarket(market):
     contractList = market[1]
     plt.title(market[0])
     for contract in contractList.values():
-        priceList = contract[1].values()
-        contractName = contract[0]
-        length = len(priceList)
-        normalizer = np.linspace(0, 1, length)
-        plt.plot(normalizer, priceList, label=contractName)
+        plotContract(contract)
     plt.legend()
-    #plt.show()
+def plotContract(contract):
+    priceList = contract[1].values()
+    avgPriceList = [price[0] for price in priceList]
+    highPriceList = [price[1] for price in priceList]
+    lowPriceList = [price[2] for price in priceList]
+    contractName = contract[0]
+    plt.plot(avgPriceList, label=contractName, color = '#70badb', alpha=.5)
+    plt.plot(lowPriceList, color = '#1e91ca', alpha=.5)
+    plt.plot(highPriceList, color = '#1072ab', alpha=.5)
+
+def contractNameToAvgTweetCount(name): #returns the average of the high and low of a contract
+    if '-' in contractName:
+        dash = contractName.index('-')
+        num1 = int(contractName[0:dash-1])
+        num2 = int(contractName[dash+1:])
+        tweetCount = (num1+num2)//2 #rounds for the sake of indexing the dict
+    elif 'more' in contractName:
+        if contractName[2] == ' ':
+            tweetCount = int(contractName[0:2]) + 5
+        else:
+            tweetCount = int(contractName[0:3]) + 5
+    else:
+        if contractName[2] == ' ':
+            tweetCount = int(contractName[0:2]) - 5
+        else:
+            tweetCount = int(contractName[0:3]) - 5
 def avgTweetCount(market):
     contractList = market[1]
     tweetCountDict = {}
     avgTweets = {}
     for contract in contractList.values():
         priceList = contract[1]
-        contractName = contract[0]
-        if '-' in contractName:
-            dash = contractName.index('-')
-            num1 = int(contractName[0:dash-1])
-            num2 = int(contractName[dash+1:])
-            tweetCount = (num1+num2)//2 #rounds for the sake of indexing the dict
-        elif 'more' in contractName:
-            if contractName[2] == ' ':
-                tweetCount = int(contractName[0:2]) + 5
-            else:
-                tweetCount = int(contractName[0:3]) + 5
-        else:
-            if contractName[2] == ' ':
-                tweetCount = int(contractName[0:2]) - 5
-            else:
-                tweetCount = int(contractName[0:3]) - 5
+        tweetCount = contractNameToAvgTweetCount(contract[0])
         tweetCountDict[tweetCount] = priceList
     somePriceList = list(contractList.values())[0][1]
     for priceTime in somePriceList:
@@ -164,7 +184,10 @@ def avgTweetCount(market):
         for tweetCount in tweetCountDict:
             priceList = tweetCountDict[tweetCount]
             price = priceList[priceTime]
-            adjustedPrice = price/sumPrices
+            if(sumPrices==0):
+                adjustedPrice = 0
+            else:
+                adjustedPrice = price/sumPrices
             avgTweets[priceTime] += adjustedPrice*tweetCount #adds the weighted tweet count to avgTweets for the given time!
     return avgTweets
 
@@ -175,7 +198,6 @@ def plotAvgTweetCount(market):
     normalizer = np.linspace(0, 1, length)
     plt.plot(normalizer, avgTweets.values(), label=market[0])
     plt.legend()
-    #plt.show()
 
 def plotMarketAndTweetCount(market):
     plt.subplot(2, 1, 1)
@@ -187,14 +209,111 @@ def plotAccount(i):
     for marketid in markets[i]:
         plotMarketAndTweetCount(getMarket(marketid))
 
-plotAccount(0)
+def movingAverage(priceList, timePeriod = 60): #time period is in minutes
+    avg = [0]*timePeriod
+    for i in range(len(priceList)-timePeriod):
+        avg.append(sum(priceList[i:i+timePeriod])/timePeriod )
+    return avg
+def plotMovingAverage(contract, timePeriod = 60):
+    priceList = [price[0] for price in contract[1].values()]
+    plt.plot(movingAverage(priceList, timePeriod))
 
-plt.show()
-#list of tweet markets
-[5372, 5388, 5404, 5420, 5436, 5453, 5468, 5494, 5513, 5537, 5552, 5571, 5591, 5614, 5374, 5391, 5407, 5422, 5438, 5456, 5470, 5493, 5519, 5541, 5555, 5576, 5594, 5617, 5377, 5394, 5410, 5428, 5442, 5457, 5478, 5505, 5523, 5546, 5559, 5582, 5606, 5621, 5378, 5393, 5411, 5427, 5443, 5458, 5479, 5504, 5524, 5547, 5560, 5583, 5607, 5622]
+def getMarketIds():
+    marketids = []
+    for i in range(4):
+        for marketid in markets[i]:
+            marketids.append(marketid)
+    return marketids
+
+def backtestMeanReversion(contract):
+    yesHeld = [0] #the number of yes's you hold (or negative the number of nos)
+    money = [0, 0] #simulates ur net money over time.. money[0] is precashout, money[1] after cashout
+    avgPriceList = [priceTriplet[0] for priceTriplet in contract[1].values()]
+    buyPriceList = [priceTriplet[1] for priceTriplet in contract[1].values()]
+    sellPriceList = [priceTriplet[2] for priceTriplet in contract[1].values()]
+    shortAverage = movingAverage(avgPriceList, 1)
+    longAverage = movingAverage(avgPriceList, 100)
+    q1 = len(avgPriceList)//4
+    q2 = len(avgPriceList)//2
+    q3 = q1+q2
+
+    def buy(n, i): #n is number of stocks, i is time (by index), NOTE n must be positive
+        money[0] -= n*buyPriceList[i]
+        if yesHeld[0] < -n:
+            money[0] += n*1.0
+        elif yesHeld[0] < 0:
+            money[0] += (0-yesHeld[0])*1.0
+        yesHeld[0] += n
+    def sell(n, i): #n must be positive
+        money[0] += n*sellPriceList[i]
+        if yesHeld[0] < 0:
+            money[0] -= n*1.0
+        elif yesHeld[0] < n:
+            money[0] -= (n-yesHeld[0])*1.0
+        yesHeld[0] -= n
+    for i in range(len(longAverage)):
+        spread = buyPriceList[i]-sellPriceList[i]
+        if i < q3:
+            if shortAverage[i] - longAverage[i] > spread*2: #upward trending
+                buy(1, i)
+            if shortAverage[i] - longAverage[i] < spread*2: #downward trending
+                sell(1, i)
+    money[1] = money[0]
+    if avgPriceList[-1]>=.98 and yesHeld[0]>0: #cashout
+        money[1] += yesHeld[0]*1
+    if avgPriceList[-1]<=.02 and yesHeld[0]<0:
+        money[1] -= yesHeld[0]*1
+    if avgPriceList[-1]>.02 and avgPriceList[-1]<.98:
+        #print('market didnt resolve yet...')
+        return [0, 0]
+    return money
+
+def plotMovingAndCurrent(market):
+    startTime = time.time()
+    for contract in market[1].values():
+        plotContract(contract)
+        #plotMovingAverage(contract, 60)
+        plotMovingAverage(contract, 100)
+    print('plotting took ' + str(time.time() - startTime))
+    plt.show()
+
+cumulativeRatio = 0
+cumulativeProfit = 0
+
+for account in markets:
+    cumulativeRatio = 0
+    cumulativeProfit = 0
+    for market in account.values():
+        #plotMovingAndCurrent(market)
+        investment = 0
+        profit = 0
+        #plotMovingAndCurrent(market)
+        for contract in market[1].values():
+            investment -= backtestMeanReversion(contract)[0]
+            profit += backtestMeanReversion(contract)[1]
+            if investment == 0:
+                if profit == 0:
+                    ratio = 0
+                else:
+                    ratio = 'wtf?'
+            else:
+                ratio = profit/investment
+            cumulativeRatio += ratio
+            cumulativeProfit += profit
+            #if random.random()<.1:
+            #    print('ratio:' + str(cumulativeRatio))
+            #    print('proft:' + str(cumulativeProfit))
+    print(cumulativeRatio)
+    print(cumulativeProfit)
 
 
 
 
 
-#hi
+
+
+
+
+
+
+#xd
